@@ -59,6 +59,15 @@ async function call(method, url, body, token) {
         body: 'All assembly deadlines use UTC and the ISO 8601 calendar.', hours: 48,
     }, tokens[0]);
     await call('POST', `/api/agendas/${agenda.id}/whip`, { choice: 'nay' }, tokens[0]);
+    // 추천을 모아 본회의 상정
+    for (const tk of tokens.slice(1)) {
+        const a = await call('POST', `/api/agendas/${agenda.id}/support`, { value: 1 }, tk);
+        if (a.status === 'open') break;
+    }
+    // 추천 단계에 머무는 의제 하나
+    const pending = await call('POST', '/api/agendas', { title: 'Make Esperanto the second assembly language', hours: 72 }, tokens[1]);
+    for (const tk of tokens.slice(2, 4)) await call('POST', `/api/agendas/${pending.id}/support`, { value: 1 }, tk);
+    await call('POST', `/api/agendas/${pending.id}/support`, { value: -1 }, tokens[5]);
     for (const tk of tokens) {
         const r = Math.random();
         if (r < 0.15) continue;
