@@ -1,0 +1,16 @@
+{
+  "name": "human-nature",
+  "version": "0.1.0",
+  "description": "전 세계 누구나 의원이 되는 온라인 의회 게임 — 정당 창당·입당·탈당, 의제 표결, 반원형 의석",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "seed": "node tools/seed.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}

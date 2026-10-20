@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Human Nature — World Assembly</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="crt"></div>
+    <header class="topbar">
+        <a class="brand" href="#/chamber">
+            <span class="brand-main">HUMAN NATURE</span>
+            <span class="brand-sub" data-i18n="tagline"></span>
+        </a>
+        <nav class="tabs">
+            <a href="#/chamber" data-tab="chamber" data-i18n="tab_chamber"></a>
+            <a href="#/parties" data-tab="parties" data-i18n="tab_parties"></a>
+            <a href="#/agendas" data-tab="agendas" data-i18n="tab_agendas"></a>
+            <a href="#/me" data-tab="me" id="tabMe"></a>
+        </nav>
+        <button class="btn ghost small" id="langBtn"></button>
+    </header>
+
+    <main id="view"></main>
+
+    <div class="tooltip" id="tooltip" hidden></div>
+    <div class="toast" id="toast" hidden></div>
+    <dialog id="dialog"></dialog>
+
+    <script src="hemicycle.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

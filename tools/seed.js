@@ -1,0 +1,59 @@
+// 데모용 데이터 채우기: 실행 중인 서버에 가상 의원·정당·의제를 만든다.
+// 사용법: REGISTER_PER_HOUR=0 npm start 로 서버를 켠 뒤  node tools/seed.js [의원 수] [서버 주소]
+'use strict';
+
+const COUNT = Number(process.argv[2]) || 120;
+const BASE = process.argv[3] || 'http://localhost:3000';
+const COUNTRIES = ['KR', 'US', 'JP', 'DE', 'FR', 'BR', 'IN', 'NG', 'GB', 'MX', 'ID', 'TR', 'PL', 'AU', 'CA', 'EG', 'VN', 'AR'];
+const PARTIES = [
+    { name: 'Workers of the World', abbr: 'WW', color: '#d62839', ideology: -80 },
+    { name: 'Green Earth Alliance', abbr: 'GEA', color: '#2bb673', ideology: -40 },
+    { name: 'Global Liberal Forum', abbr: 'GLF', color: '#f5c518', ideology: 5 },
+    { name: 'Federalist Union', abbr: 'FU', color: '#3a7bd5', ideology: 45 },
+    { name: 'Tradition & Nation', abbr: 'TN', color: '#6b3fa0', ideology: 80 },
+];
+
+async function call(method, url, body, token) {
+    const res = await fetch(BASE + url, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+    });
+    const out = await res.json();
+    if (!res.ok) throw new Error(`${method} ${url}: ${out.error}`);
+    return out;
+}
+
+(async () => {
+    const run = Date.now().toString(36);
+    const tokens = [];
+    for (let i = 0; i < COUNT; i++) {
+        const { token } = await call('POST', '/api/register', {
+            username: `demo_${run}_${i}`, password: 'demo-password', name: `Deputy ${i + 1}`,
+            country: COUNTRIES[i % COUNTRIES.length],
+        }).catch(e => { console.error(e.message); return {}; });
+        if (token) tokens.push(token);
+    }
+    const parties = [];
+    for (let i = 0; i < PARTIES.length && i < tokens.length; i++) {
+        parties.push(await call('POST', '/api/parties', {
+            ...PARTIES[i], description: 'Demo party.', links: { discord: 'https://discord.gg/example' },
+        }, tokens[i]));
+    }
+    const weights = [0.12, 0.2, 0.25, 0.18, 0.1]; // 나머지는 무소속
+    for (let i = parties.length; i < tokens.length; i++) {
+        let r = Math.random(), k = 0;
+        while (k < weights.length && r > weights[k]) { r -= weights[k]; k++; }
+        if (k < parties.length) await call('POST', `/api/parties/${parties[k].id}/join`, null, tokens[i]);
+    }
+    const agenda = await call('POST', '/api/agendas', {
+        title: 'Adopt a universal calendar for the World Assembly',
+        body: 'All assembly deadlines use UTC and the ISO 8601 calendar.', hours: 48,
+    }, tokens[0]);
+    for (const tk of tokens) {
+        const r = Math.random();
+        if (r < 0.15) continue;
+        await call('POST', `/api/agendas/${agenda.id}/vote`, { choice: r < 0.6 ? 'yea' : r < 0.9 ? 'nay' : 'abs' }, tk);
+    }
+    console.log(`seeded ${tokens.length} deputies, ${parties.length} parties, agenda ${agenda.id}`);
+})();
