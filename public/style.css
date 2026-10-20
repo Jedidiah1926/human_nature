@@ -177,3 +177,18 @@ dialog {
     width: min(560px, calc(100vw - 32px)); padding: 20px; box-shadow: 0 0 24px var(--neon-dim);
 }
 dialog::backdrop { background: rgba(0,0,0,0.6); }
+
+/* ===== 당내 직책 · 공지 ===== */
+.gold { color: var(--gold); }
+.notice { margin-top: 8px; padding: 6px 10px; border-left: 2px solid var(--gold); color: #d8d0a0; background: rgba(255,215,0,0.04); }
+.roles { list-style: none; margin: 0; padding: 0; counter-reset: none; }
+.roles li { padding: 8px 0; border-bottom: 1px dashed #2a2e38; }
+.roles li:last-child { border-bottom: none; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.chip { font-size: 0.74rem; padding: 0 6px; border: 1px solid var(--neon-dim); color: var(--neon); }
+.scroll { max-height: 520px; overflow-y: auto; }
+.scroll td select { width: auto; max-width: 160px; padding: 3px 6px; font-size: 0.85rem; }
+label.check { display: flex; gap: 10px; align-items: flex-start; color: var(--text); cursor: pointer; }
+label.check input { width: auto; margin-top: 4px; accent-color: var(--neon); }
+label.check input:disabled + span { opacity: 0.4; }
+.whip-note { margin-bottom: 6px; }

@@ -35,6 +35,8 @@ let db = {
 function loadDb() {
     try {
         db = { ...db, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) };
+        Object.values(db.parties).forEach(migrateParty);
+        Object.values(db.agendas).forEach(a => { a.whips ??= {}; });
     } catch (e) {
         if (e.code !== 'ENOENT') throw e;
     }
@@ -108,18 +110,75 @@ function partyMembers(partyId) {
 }
 
 function publicUser(u) {
-    return { id: u.id, name: u.name, country: u.country, partyId: u.partyId, createdAt: u.createdAt };
+    return { id: u.id, name: u.name, country: u.country, partyId: u.partyId, partyRoleId: u.partyRoleId || null, createdAt: u.createdAt };
 }
 
-// 정당을 떠날 때: 대표가 떠나면 가장 오래된 당원이 승계, 아무도 없으면 해산
+// ===== 당내 직책 · 권한 =====
+// 직책은 party.roles 배열 순서가 곧 서열(앞이 높음). 대표는 모든 직책보다 높고 모든 권한을 가짐.
+const PERMS = ['edit_info', 'announce', 'approve_join', 'manage_members', 'manage_roles', 'set_whip'];
+const KICK_BLOCK_MS = 24 * 3600e3;
+
+function roleIndex(party, roleId) {
+    return roleId ? party.roles.findIndex(r => r.id === roleId) : -1;
+}
+
+// 서열 숫자: 작을수록 높음. 대표 -1, 직책 0..n-1, 평당원 Infinity
+function rank(party, user) {
+    if (party.leaderId === user.id) return -1;
+    const i = roleIndex(party, user.partyRoleId);
+    return i < 0 ? Infinity : i;
+}
+
+function hasPerm(party, user, perm) {
+    if (!user || user.partyId !== party.id) return false;
+    if (party.leaderId === user.id) return true;
+    const role = party.roles.find(r => r.id === user.partyRoleId);
+    return !!role && role.perms.includes(perm);
+}
+
+function requirePerm(party, user, perm) {
+    if (!hasPerm(party, user, perm)) fail(403, 'no_permission');
+}
+
+// 자기보다 낮은 서열의 당원/직책만 다룰 수 있음
+function requireOutranks(party, actor, target) {
+    if (rank(party, actor) >= rank(party, target)) fail(403, 'rank_too_low');
+}
+function requireRoleBelow(party, actor, roleIdx) {
+    if (roleIdx <= rank(party, actor)) fail(403, 'rank_too_low');
+}
+
+function joinParty(user, party) {
+    if (user.partyId) leaveParty(user);
+    for (const p of Object.values(db.parties)) delete p.requests[user.id];
+    user.partyId = party.id;
+    user.partyRoleId = null;
+    user.partyJoinedAt = Date.now();
+}
+
+// 정당을 떠날 때: 대표가 떠나면 서열이 가장 높은 당원(같으면 먼저 입당한 당원)이 승계, 아무도 없으면 해산
 function leaveParty(user) {
     const party = db.parties[user.partyId];
     user.partyId = null;
+    user.partyRoleId = null;
     user.partyJoinedAt = null;
     if (!party) return;
-    const rest = partyMembers(party.id).sort((a, b) => a.partyJoinedAt - b.partyJoinedAt);
-    if (rest.length === 0) delete db.parties[party.id];
-    else if (party.leaderId === user.id) party.leaderId = rest[0].id;
+    const rest = partyMembers(party.id).sort((a, b) => (rank(party, a) - rank(party, b)) || (a.partyJoinedAt - b.partyJoinedAt));
+    if (rest.length === 0) {
+        delete db.parties[party.id];
+    } else if (party.leaderId === user.id) {
+        party.leaderId = rest[0].id;
+        rest[0].partyRoleId = null;
+    }
+}
+
+function migrateParty(p) {
+    p.roles ??= [];
+    p.joinPolicy ??= 'open';
+    p.requests ??= {};
+    p.kicked ??= {};
+    p.notice ??= '';
+    return p;
 }
 
 function tally(agenda) {
@@ -172,6 +231,7 @@ const route = (method, pattern, handler) => routes.push({ method, pattern, handl
 route('GET', /^\/api\/state$/, () => ({
     version,
     rules: RULES,
+    perms: PERMS,
     parties: Object.values(db.parties).map(p => ({ ...p, seats: partyMembers(p.id).length })),
     members: Object.values(db.users).map(publicUser),
     agendas: Object.values(db.agendas).map(summarizeAgenda).sort((a, b) => b.createdAt - a.createdAt),
@@ -256,11 +316,9 @@ function readPartyFields(body, party = {}) {
 route('POST', /^\/api\/parties$/, (req, body) => {
     const u = auth(req);
     const fields = readPartyFields(body);
-    if (u.partyId) leaveParty(u);
-    const party = { id: nextId('p'), ...fields, leaderId: u.id, createdAt: Date.now() };
+    const party = migrateParty({ id: nextId('p'), ...fields, leaderId: u.id, createdAt: Date.now() });
     db.parties[party.id] = party;
-    u.partyId = party.id;
-    u.partyJoinedAt = Date.now();
+    joinParty(u, party);
     changed();
     return party;
 });
@@ -269,11 +327,26 @@ function getParty(id) {
     return db.parties[id] || fail(404, 'party_not_found');
 }
 
+// 정당 정보(edit_info) · 공지(announce) · 입당 방식(approve_join)을 각각의 권한으로 수정
 route('PATCH', /^\/api\/parties\/(\w+)$/, (req, body, [id]) => {
     const u = auth(req);
     const party = getParty(id);
-    if (party.leaderId !== u.id) fail(403, 'leader_only');
-    Object.assign(party, readPartyFields(body, party));
+    const infoKeys = ['name', 'abbr', 'color', 'ideology', 'description', 'links'];
+    if (infoKeys.some(k => body[k] !== undefined)) {
+        requirePerm(party, u, 'edit_info');
+        Object.assign(party, readPartyFields(body, party));
+    }
+    if (body.notice !== undefined) {
+        requirePerm(party, u, 'announce');
+        party.notice = str(body.notice, 2000);
+        party.noticeAt = Date.now();
+        party.noticeBy = u.id;
+    }
+    if (body.joinPolicy !== undefined) {
+        requirePerm(party, u, 'approve_join');
+        if (!['open', 'approval'].includes(body.joinPolicy)) fail(400, 'invalid_policy');
+        party.joinPolicy = body.joinPolicy;
+    }
     changed();
     return party;
 });
@@ -282,9 +355,32 @@ route('POST', /^\/api\/parties\/(\w+)\/join$/, (req, body, [id]) => {
     const u = auth(req);
     const party = getParty(id);
     if (u.partyId === party.id) return { ok: true };
-    if (u.partyId) leaveParty(u);
-    u.partyId = party.id;
-    u.partyJoinedAt = Date.now();
+    if ((party.kicked[u.id] || 0) > Date.now()) fail(403, 'kicked_recently');
+    if (party.joinPolicy === 'approval') {
+        party.requests[u.id] = Date.now();
+        changed();
+        return { pending: true };
+    }
+    joinParty(u, party);
+    changed();
+    return { ok: true };
+});
+
+route('POST', /^\/api\/parties\/(\w+)\/cancel-request$/, (req, body, [id]) => {
+    const u = auth(req);
+    delete getParty(id).requests[u.id];
+    changed();
+    return { ok: true };
+});
+
+route('POST', /^\/api\/parties\/(\w+)\/requests\/(\w+)\/(approve|reject)$/, (req, body, [id, uid, decision]) => {
+    const u = auth(req);
+    const party = getParty(id);
+    requirePerm(party, u, 'approve_join');
+    const target = db.users[uid];
+    if (!target || !party.requests[uid]) fail(404, 'request_not_found');
+    delete party.requests[uid];
+    if (decision === 'approve') joinParty(target, party);
     changed();
     return { ok: true };
 });
@@ -297,13 +393,116 @@ route('POST', /^\/api\/parties\/leave$/, (req) => {
     return { ok: true };
 });
 
+function getMember(party, uid) {
+    const target = db.users[uid];
+    if (!target || target.partyId !== party.id) fail(400, 'not_a_member');
+    return target;
+}
+
+route('POST', /^\/api\/parties\/(\w+)\/members\/(\w+)\/kick$/, (req, body, [id, uid]) => {
+    const u = auth(req);
+    const party = getParty(id);
+    requirePerm(party, u, 'manage_members');
+    const target = getMember(party, uid);
+    requireOutranks(party, u, target);
+    leaveParty(target);
+    party.kicked[target.id] = Date.now() + KICK_BLOCK_MS;
+    changed();
+    return { ok: true };
+});
+
+// 직책 임명 · 해임 (roleId: null 이면 평당원)
+route('POST', /^\/api\/parties\/(\w+)\/members\/(\w+)\/role$/, (req, body, [id, uid]) => {
+    const u = auth(req);
+    const party = getParty(id);
+    requirePerm(party, u, 'manage_roles');
+    const target = getMember(party, uid);
+    requireOutranks(party, u, target);
+    if (body.roleId) {
+        const idx = roleIndex(party, body.roleId);
+        if (idx < 0) fail(404, 'role_not_found');
+        requireRoleBelow(party, u, idx);
+    }
+    target.partyRoleId = body.roleId || null;
+    changed();
+    return { ok: true };
+});
+
+// 대표 직접 위임: 대표만 가능, 이전 대표는 평당원(또는 지정한 직책)이 됨
 route('POST', /^\/api\/parties\/(\w+)\/leader$/, (req, body, [id]) => {
     const u = auth(req);
     const party = getParty(id);
     if (party.leaderId !== u.id) fail(403, 'leader_only');
-    const target = db.users[body.userId];
-    if (!target || target.partyId !== party.id) fail(400, 'not_a_member');
+    const target = getMember(party, body.userId);
+    if (target.id === u.id) return { ok: true };
+    const keepRole = body.keepRoleId && roleIndex(party, body.keepRoleId) >= 0 ? body.keepRoleId : null;
     party.leaderId = target.id;
+    target.partyRoleId = null;
+    u.partyRoleId = keepRole;
+    changed();
+    return { ok: true };
+});
+
+function readRole(body, party, actor, role = {}) {
+    const name = body.name !== undefined ? str(body.name, 30, { required: true }) : role.name;
+    const perms = body.perms !== undefined ? body.perms : role.perms;
+    if (!Array.isArray(perms) || perms.some(p => !PERMS.includes(p))) fail(400, 'invalid_perms');
+    // 자기가 가진 권한만 남에게 줄 수 있음
+    if (perms.some(p => !hasPerm(party, actor, p))) fail(403, 'no_permission');
+    if (party.roles.some(r => r.id !== role.id && r.name.toLowerCase() === name.toLowerCase())) fail(409, 'role_name_taken');
+    return { name, perms: [...new Set(perms)] };
+}
+
+route('POST', /^\/api\/parties\/(\w+)\/roles$/, (req, body, [id]) => {
+    const u = auth(req);
+    const party = getParty(id);
+    requirePerm(party, u, 'manage_roles');
+    if (party.roles.length >= 20) fail(400, 'too_many_roles');
+    const role = { id: nextId('r'), ...readRole(body, party, u) };
+    party.roles.push(role); // 새 직책은 맨 아래 서열
+    changed();
+    return role;
+});
+
+function getRole(party, rid) {
+    const idx = roleIndex(party, rid);
+    if (idx < 0) fail(404, 'role_not_found');
+    return idx;
+}
+
+route('PATCH', /^\/api\/parties\/(\w+)\/roles\/(\w+)$/, (req, body, [id, rid]) => {
+    const u = auth(req);
+    const party = getParty(id);
+    requirePerm(party, u, 'manage_roles');
+    const idx = getRole(party, rid);
+    requireRoleBelow(party, u, idx);
+    Object.assign(party.roles[idx], readRole(body, party, u, party.roles[idx]));
+    changed();
+    return party.roles[idx];
+});
+
+route('DELETE', /^\/api\/parties\/(\w+)\/roles\/(\w+)$/, (req, body, [id, rid]) => {
+    const u = auth(req);
+    const party = getParty(id);
+    requirePerm(party, u, 'manage_roles');
+    const idx = getRole(party, rid);
+    requireRoleBelow(party, u, idx);
+    party.roles.splice(idx, 1);
+    for (const m of partyMembers(party.id)) if (m.partyRoleId === rid) m.partyRoleId = null;
+    changed();
+    return { ok: true };
+});
+
+// 서열 올리기/내리기: 자기보다 낮은 직책끼리만 자리 바꿈
+route('POST', /^\/api\/parties\/(\w+)\/roles\/(\w+)\/move$/, (req, body, [id, rid]) => {
+    const u = auth(req);
+    const party = getParty(id);
+    requirePerm(party, u, 'manage_roles');
+    const idx = getRole(party, rid);
+    const to = idx + (body.dir === 'up' ? -1 : 1);
+    if (to < 0 || to >= party.roles.length) return { ok: true };
+    requireRoleBelow(party, u, Math.min(idx, to));
+    [party.roles[idx], party.roles[to]] = [party.roles[to], party.roles[idx]];
     changed();
     return { ok: true };
 });
@@ -325,6 +524,7 @@ route('POST', /^\/api\/agendas$/, (req, body) => {
         createdAt: now,
         closesAt: now + Math.round(hours * 3600e3),
         votes: {},
+        whips: {},      // partyId -> 당론 'yea' | 'nay' | 'abs'
         status: 'open',
         snapshot: null,
     };
@@ -339,7 +539,7 @@ function getAgenda(id) {
 
 route('GET', /^\/api\/agendas\/(\w+)$/, (req, body, [id]) => {
     const a = getAgenda(id);
-    return { ...summarizeAgenda(a), body: a.body, votes: a.votes, snapshot: a.snapshot };
+    return { ...summarizeAgenda(a), body: a.body, votes: a.votes, whips: a.whips, snapshot: a.snapshot };
 });
 
 route('POST', /^\/api\/agendas\/(\w+)\/vote$/, (req, body, [id]) => {
@@ -350,6 +550,20 @@ route('POST', /^\/api\/agendas\/(\w+)\/vote$/, (req, body, [id]) => {
     a.votes[u.id] = body.choice;
     changed();
     return summarizeAgenda(a);
+});
+
+// 당론 지정 (set_whip). choice 'free' 면 자유 투표로 되돌림
+route('POST', /^\/api\/agendas\/(\w+)\/whip$/, (req, body, [id]) => {
+    const u = auth(req);
+    const a = getAgenda(id);
+    if (a.status !== 'open' || a.closesAt <= Date.now()) fail(400, 'agenda_closed');
+    const party = db.parties[u.partyId] || fail(400, 'not_in_party');
+    requirePerm(party, u, 'set_whip');
+    if (body.choice === 'free') delete a.whips[party.id];
+    else if (['yea', 'nay', 'abs'].includes(body.choice)) a.whips[party.id] = body.choice;
+    else fail(400, 'invalid_choice');
+    changed();
+    return { ok: true };
 });
 
 route('POST', /^\/api\/agendas\/(\w+)\/withdraw$/, (req, body, [id]) => {

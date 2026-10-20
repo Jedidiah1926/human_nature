@@ -46,10 +46,19 @@ async function call(method, url, body, token) {
         while (k < weights.length && r > weights[k]) { r -= weights[k]; k++; }
         if (k < parties.length) await call('POST', `/api/parties/${parties[k].id}/join`, null, tokens[i]);
     }
+    // 첫 정당에 직책 몇 개와 당론
+    const P = `/api/parties/${parties[0].id}`;
+    const vice = await call('POST', `${P}/roles`, { name: 'Deputy Leader', perms: ['edit_info', 'announce', 'approve_join', 'manage_members', 'manage_roles'] }, tokens[0]);
+    const whip = await call('POST', `${P}/roles`, { name: 'Chief Whip', perms: ['set_whip'] }, tokens[0]);
+    await call('PATCH', P, { notice: 'Weekly meeting on Discord every Sunday 12:00 UTC.' }, tokens[0]);
+    const firstMembers = (await call('GET', '/api/state')).members.filter(m => m.partyId === parties[0].id && m.id !== parties[0].leaderId);
+    if (firstMembers[0]) await call('POST', `${P}/members/${firstMembers[0].id}/role`, { roleId: vice.id }, tokens[0]);
+    if (firstMembers[1]) await call('POST', `${P}/members/${firstMembers[1].id}/role`, { roleId: whip.id }, tokens[0]);
     const agenda = await call('POST', '/api/agendas', {
         title: 'Adopt a universal calendar for the World Assembly',
         body: 'All assembly deadlines use UTC and the ISO 8601 calendar.', hours: 48,
     }, tokens[0]);
+    await call('POST', `/api/agendas/${agenda.id}/whip`, { choice: 'nay' }, tokens[0]);
     for (const tk of tokens) {
         const r = Math.random();
         if (r < 0.15) continue;
